@@ -90,24 +90,29 @@ class StreamingHTTPServer:
             worker.join()
 
 
-def gunicorn_handler(environ, start_response):
-    log.info('HTTP Server received event: %s', str(environ))
-    response_body = b''
-    status = '100 Continue'
+class GunicornHandler(object):
+    def __init__(self):
+	log.info('HTTP Handler initialized')
+        self.events = []
 
-    response_headers = [
-        ('Content-Type', 'text/plain'),
-    ]
-
-    start_response(status, response_headers)
-
-    return [response_body]
+    def __call__(self, environ, start_response):
+	data = environ['wsgi.input'].read()
+	self.events.append(data)
+	log.info('HTTP Handler total events: %d', len(self.events))
+	log.info('HTTP Server received event: %s', data)
+	response_body = b''
+	status = '100 Continue'
+	response_headers = [
+	    ('Content-Type', 'text/plain'),
+	]
+	start_response(status, response_headers)
+	return [response_body]
 
 
 class GunicornServer(gunicorn.app.base.BaseApplication):
     def __init__(self, handler, options=None):
         self.application = handler
-        self.host = self.options = options or {}
+        self.options = options or {}
         super(GunicornServer, self).__init__()
 
     def load_config(self):
@@ -150,7 +155,8 @@ if __name__== "__main__":
     elif server_type == 3:
         options = {
             'bind': '%s:%s' % (host, str(port)),
-            'workers': num_workers,
+            'workers': 1,
+            'threads': num_workers,
         }
         log.info('gunicorn HTTP Server started on: %s', (host, port))
-        GunicornServer(gunicorn_handler, options).run()
+        GunicornServer(GunicornHandler(), options).run()
