@@ -6,6 +6,8 @@ import threading
 import socket
 import time
 import sys
+import gunicorn.app.base
+from gunicorn.six import iteritems
 
 # configure logging for the tests module
 log = logging.getLogger('HTTPTestServer')
@@ -20,7 +22,7 @@ class HTTPPostHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
             log.info('HTTP Server (%d) received event: %s', self.server.worker_id, str(body))
         except:
-            log.error('HTTP Server received empty event: %s', str(body))
+            log.error('HTTP Server received empty event')
             self.send_response(400)
         else:
             self.send_response(100)
@@ -33,10 +35,12 @@ class ThreadedHTTPServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer)
         BaseHTTPServer.HTTPServer.__init__(self, addr, handler)
         self.worker_id = threading.currentThread().ident
 
+
 class HTTPServerWithID(BaseHTTPServer.HTTPServer):
     def __init__(self, addr, handler, worker_id, bind_address=True):
         BaseHTTPServer.HTTPServer.__init__(self, addr, handler, bind_address)
         self.worker_id = worker_id
+
 
 class HTTPServerThread(threading.Thread):
     def __init__(self, i, sock, addr):
@@ -65,7 +69,7 @@ class HTTPServerThread(threading.Thread):
 
 class StreamingHTTPServer:
     """multithreaded streaming server, based on: https://stackoverflow.com/questions/46210672/"""
-    def __init__(self, host, port, num_workers=100):
+    def __init__(self, host, port, num_workers=10):
         addr = (host, port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -85,10 +89,42 @@ class StreamingHTTPServer:
             worker.close()
             worker.join()
 
+
+def gunicorn_handler(environ, start_response):
+    log.info('HTTP Server received event: %s', str(environ))
+    response_body = b''
+    status = '100 Continue'
+
+    response_headers = [
+        ('Content-Type', 'text/plain'),
+    ]
+
+    start_response(status, response_headers)
+
+    return [response_body]
+
+
+class GunicornServer(gunicorn.app.base.BaseApplication):
+    def __init__(self, handler, options=None):
+        self.application = handler
+        self.host = self.options = options or {}
+        super(GunicornServer, self).__init__()
+
+    def load_config(self):
+        config = dict([(key, value) for key, value in iteritems(self.options)
+                       if key in self.cfg.settings and value is not None])
+        for key, value in iteritems(config):
+            self.cfg.set(key.lower(), value)
+
+    def load(self):
+        return self.application
+
+
 # 0 - single threaded
 # 1 - multi threaded
 # 2 - multi threaded streaming
-server_type = 2
+# 3 - gunicorn
+server_type = 3
 
 if __name__== "__main__":
     if len(sys.argv) != 3:
@@ -96,6 +132,7 @@ if __name__== "__main__":
         exit(1)
     host = sys.argv[1]
     port = int(sys.argv[2])
+    num_workers = 10
     if server_type == 0:
         httpd = HTTPServerWithID((host, port), HTTPPostHandler, 1)
         log.info('HTTP Server (1) started on: %s', (host, port))
@@ -107,6 +144,13 @@ if __name__== "__main__":
         httpd.serve_forever()
         log.info('Multi-threaded HTTP Server ended')
     elif server_type == 2:
-        httpd = StreamingHTTPServer(host, port, 10)
+        httpd = StreamingHTTPServer(host, port, num_workers)
         while True:
             time.sleep(1)
+    elif server_type == 3:
+        options = {
+            'bind': '%s:%s' % (host, str(port)),
+            'workers': num_workers,
+        }
+        log.info('gunicorn HTTP Server started on: %s', (host, port))
+        GunicornServer(gunicorn_handler, options).run()
